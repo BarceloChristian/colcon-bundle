@@ -59,11 +59,11 @@ class AptBundleInstallerExtension(BundleInstallerExtensionPoint):
         )
 
     def should_load(self):  # noqa: D102
+        """Determine if this plugin should load."""
         try:
-            with open(os.devnull, 'w') as devnull:
-                subprocess.check_call(
-                    ['apt-get', '--help'], stdout=devnull, stderr=devnull)
-        except subprocess.CalledProcessError:
+            get_ubuntu_distribution_version()
+        except ValueError:
+            # Not on ubuntu, shouldn't load
             return False
 
         try:
@@ -81,11 +81,8 @@ class AptBundleInstallerExtension(BundleInstallerExtensionPoint):
         return True
 
     def initialize(self, context):  # noqa: D102
-        import apt
         self.context = context
         self._cache_dir = context.cache_path
-        self._cache = apt.Cache(
-            rootdir=self._cache_dir, progress=apt.progress.text.OpProgress())
         self.include_sources = self.context.args.include_sources
         self.allow_insecure = self.context.args.apt_allow_insecure
         self.sources_path = os.path.join(self._cache_dir, 'sources')
@@ -94,13 +91,20 @@ class AptBundleInstallerExtension(BundleInstallerExtensionPoint):
     def setup(self):  # noqa: D102
         import apt
 
+        # Get config values before creating cache, as the cache changes
+        # the global config values when initialized.
+        trusted = apt.apt_pkg.config.find_file('Dir::Etc::Trusted')
+        trustedparts = apt.apt_pkg.config.find_file('Dir::Etc::TrustedParts')
+
+        # Create cache after getting config values, the cache changes
+        # global config values.
+        self._cache = apt.Cache(rootdir=self._cache_dir,
+                                progress=apt.progress.text.OpProgress())
+
+        # Always get config values before creating the cache.
         apt.apt_pkg.config.set('APT::Install-Recommends', 'False')
-        apt.apt_pkg.config.set('Dir::Etc::Trusted',
-                               apt.apt_pkg.config.find_file(
-                                   'Dir::Etc::Trusted'))
-        apt.apt_pkg.config.set('Dir::Etc::TrustedParts',
-                               apt.apt_pkg.config.find_file(
-                                   'Dir::Etc::TrustedParts'))
+        apt.apt_pkg.config.set('Dir::Etc::Trusted', trusted)
+        apt.apt_pkg.config.set('Dir::Etc::TrustedParts', trustedparts)
         apt.apt_pkg.config.set('Acquire::BrokenProxy', 'true')
         apt.apt_pkg.config.set('Acquire::http::Pipeline-Depth', '0')
         apt.apt_pkg.config.set('Acquire::http::No-Cache', 'true')
@@ -133,7 +137,12 @@ class AptBundleInstallerExtension(BundleInstallerExtensionPoint):
 
         # Update the cache to the latest, we might not want to do this if the
         # cache already exists?
-        self._cache.update()
+        try:
+            self._cache.update()
+        except apt.cache.FetchFailedException as e:
+            logger.error('Could not fetch from repositories: {}'.format(e))
+            raise RuntimeError('Failed to fetch from repositories. Did '
+                               'you set your keys correctly?')
         self._cache.open()
 
     def is_package_available(self, package_name):  # noqa: D102
